@@ -1,0 +1,26 @@
+[package]
+name = "garage"
+version = "0.1.0"
+edition = "2021"
+description = "Garage S3 object store — orca plugin over the Garage admin API v2"
+
+[package.metadata.orca]
+category = "storage"
+
+[lib]
+name = "garage"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "garage"
+path = "src/main.rs"
+
+[dependencies]
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "delegated-http"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt"] }
+
+[lints.clippy]
+let_underscore_must_use = "deny"

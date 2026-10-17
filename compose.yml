@@ -1,0 +1,43 @@
+services:
+  garage:
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    container_name: garage
+    user: "${GARAGE_UID:-1000}:${GARAGE_GID:-1000}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${GARAGE_BIND_ADDR:?set GARAGE_BIND_ADDR}:3900:3900"
+      - "${GARAGE_ADMIN_BIND_ADDR:-127.0.0.1}:3903:3903"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - ${GARAGE_META_PATH:-./meta}:/var/lib/garage/meta
+      - ${GARAGE_DATA_PATH:-./data}:/var/lib/garage/data
+    secrets:
+      - rpc_secret
+      - admin_token
+      - metrics_token
+    networks:
+      - garage
+    healthcheck:
+      test: ["CMD", "/garage", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    mem_limit: ${GARAGE_MEM_LIMIT:-2g}
+    pids_limit: 512
+    restart: unless-stopped
+
+secrets:
+  rpc_secret:
+    file: ./secrets/rpc_secret
+  admin_token:
+    file: ./secrets/admin_token
+  metrics_token:
+    file: ./secrets/metrics_token
+
+networks:
+  garage: {}
