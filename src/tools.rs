@@ -14,7 +14,7 @@ pub async fn connect(name: &str) -> Result<Garage> {
     let row = endpoint_db::require(name)?;
     require_routes(name, &row.routes)?;
     let base_url = route::resolve_reachable(name, &row.routes, false).await?;
-    Ok(Garage::new(&base_url, token.expose_secret()))
+    Garage::new(&base_url, token.expose_secret())
 }
 
 pub fn require_routes<T>(name: &str, routes: &[T]) -> Result<()> {
@@ -75,10 +75,15 @@ pub struct LayoutApplyArgs {
     #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Apply even when the layout has staged changes for other nodes.
+    #[arg(long)]
+    #[serde(default)]
+    pub apply_all_staged: bool,
 }
 
 /// Assign a node a zone and capacity and apply the layout at the next version
-/// (`UpdateClusterLayout`, `ApplyClusterLayout`).
+/// (`UpdateClusterLayout`, `ApplyClusterLayout`). Refuses when other nodes have
+/// staged changes unless `apply_all_staged` is set.
 #[orca_tool(
     domain = "garage",
     verb = "layout.apply",
@@ -88,7 +93,13 @@ pub struct LayoutApplyArgs {
 async fn garage_layout_apply(args: LayoutApplyArgs, _ctx: &ToolCtx) -> Result<LayoutApplied> {
     connect(&args.name)
         .await?
-        .assign_node(&args.node_id, &args.zone, args.capacity, &args.tags)
+        .assign_node(
+            &args.node_id,
+            &args.zone,
+            args.capacity,
+            &args.tags,
+            args.apply_all_staged,
+        )
         .await
 }
 
@@ -173,10 +184,25 @@ pub struct BucketUpdateArgs {
     /// Maximum object count. Omit for no limit.
     #[arg(long)]
     pub max_objects: Option<u64>,
+    /// Remove both quotas.
+    #[arg(long)]
+    #[serde(default)]
+    pub clear: bool,
 }
 
-/// Set a bucket's size and object quotas; an omitted quota is removed
-/// (`UpdateBucket`).
+pub fn quotas(args: &BucketUpdateArgs) -> Result<Quotas> {
+    let any = args.max_size.is_some() || args.max_objects.is_some();
+    if any == args.clear {
+        bail!("pass max_size and/or max_objects, or clear to remove both quotas");
+    }
+    Ok(Quotas {
+        max_size: args.max_size,
+        max_objects: args.max_objects,
+    })
+}
+
+/// Set a bucket's size and object quotas; an omitted quota is removed. Needs
+/// at least one quota or `clear` (`UpdateBucket`).
 #[orca_tool(
     domain = "garage",
     verb = "bucket.update",
@@ -184,16 +210,10 @@ pub struct BucketUpdateArgs {
     execute_gated = true
 )]
 async fn garage_bucket_update(args: BucketUpdateArgs, _ctx: &ToolCtx) -> Result<Bucket> {
+    let quotas = quotas(&args)?;
     let g = connect(&args.name).await?;
     let id = g.bucket_id(&args.bucket).await?;
-    g.set_quotas(
-        &id,
-        Quotas {
-            max_size: args.max_size,
-            max_objects: args.max_objects,
-        },
-    )
-    .await
+    g.set_quotas(&id, quotas).await
 }
 
 #[orca_struct(args)]
@@ -340,17 +360,22 @@ pub struct StoredKey {
 pub async fn create_key(g: &Garage, endpoint: &str, key_name: &str) -> Result<StoredKey> {
     let (key, secret) = g.create_key(key_name).await?;
     let secret_ref = key_secret_name(endpoint, &key.access_key_id)?;
-    secrets::set(
+    if let Err(e) = secrets::set(
         &secret_ref,
         secret.expose_secret(),
         Some(&format!("garage secret access key {}", key.access_key_id)),
-    )
-    .with_context(|| {
-        format!(
-            "key {} was created but its secret could not be stored; delete it with garage.key.delete",
+    ) {
+        let rollback = match g.delete_key(&key.access_key_id).await {
+            Ok(_) => "the key was deleted from garage".to_string(),
+            Err(d) => format!(
+                "deleting the key from garage also failed ({d:#}); delete it with garage.key.delete"
+            ),
+        };
+        bail!(
+            "key {} was created but its secret could not be stored ({e:#}); {rollback}",
             key.access_key_id
-        )
-    })?;
+        );
+    }
     Ok(StoredKey { key, secret_ref })
 }
 
@@ -374,7 +399,7 @@ pub struct KeyImportArgs {
     /// Access key id to import.
     #[arg(long)]
     pub key_id: String,
-    /// Orca secret holding the secret access key.
+    /// Orca secret holding the secret access key, named `garage.<endpoint>.*`.
     #[arg(long)]
     pub secret_ref: String,
     /// Key name.
@@ -382,7 +407,16 @@ pub struct KeyImportArgs {
     pub key_name: Option<String>,
 }
 
+pub fn check_import_ref(endpoint: &str, secret_ref: &str) -> Result<()> {
+    let prefix = format!("{PROVIDER}.{endpoint}.");
+    if !secret_ref.starts_with(&prefix) || secret_ref.ends_with(".admin_token") {
+        bail!("secret_ref must start with {prefix} and must not be the admin token");
+    }
+    Ok(())
+}
+
 pub async fn import_key(g: &Garage, args: &KeyImportArgs) -> Result<StoredKey> {
+    check_import_ref(&args.name, &args.secret_ref)?;
     let secret = secrets::get_required(&args.secret_ref)?;
     let key = g
         .import_key(
@@ -418,17 +452,20 @@ pub struct KeyDeleted {
 }
 
 pub async fn delete_key(g: &Garage, endpoint: &str, key_id: &str) -> Result<KeyDeleted> {
-    g.delete_key(key_id).await?;
-    let secret_removed = secrets::delete(&key_secret_name(endpoint, key_id)?)?;
+    let deleted = g.delete_key(key_id).await?;
+    let secret_removed =
+        secrets::delete(&key_secret_name(endpoint, key_id)?).with_context(|| {
+            format!("key {key_id} is gone from garage but its stored secret could not be deleted")
+        })?;
     Ok(KeyDeleted {
         id: key_id.to_string(),
-        deleted: true,
+        deleted,
         secret_removed,
     })
 }
 
-/// Delete an access key and the secret `garage.key.create` stored for it
-/// (`DeleteKey`).
+/// Delete an access key and the secret `garage.key.create` stored for it; a key
+/// already gone from Garage still has its secret removed (`DeleteKey`).
 #[orca_tool(
     domain = "garage",
     verb = "key.delete",
@@ -470,6 +507,29 @@ mod tests {
     fn empty_routes_give_a_clear_error() {
         assert!(require_routes::<String>("g", &[]).is_err());
         assert!(require_routes("g", &["http://g.test:3903".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn import_refs_are_scoped_and_never_the_admin_token() {
+        assert!(check_import_ref("main", "garage.main.imported").is_ok());
+        assert!(check_import_ref("main", "garage.main.admin_token").is_err());
+        assert!(check_import_ref("main", "garage.other.imported").is_err());
+        assert!(check_import_ref("main", "homelab.s3").is_err());
+    }
+
+    #[test]
+    fn bucket_update_needs_a_quota_or_clear() {
+        let args = |max_size, clear| BucketUpdateArgs {
+            name: "main".into(),
+            bucket: "b".into(),
+            max_size,
+            max_objects: None,
+            clear,
+        };
+        assert!(quotas(&args(None, false)).is_err());
+        assert!(quotas(&args(Some(1), true)).is_err());
+        assert_eq!(quotas(&args(Some(1), false)).unwrap().max_size, Some(1));
+        assert_eq!(quotas(&args(None, true)).unwrap(), Quotas::default());
     }
 
     #[test]

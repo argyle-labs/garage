@@ -1,6 +1,8 @@
 metadata_dir = "/var/lib/garage/meta"
 data_dir = "/var/lib/garage/data"
 db_engine = "lmdb"
+metadata_fsync = true
+data_fsync = true
 metadata_auto_snapshot_interval = "6h"
 
 replication_factor = 1
@@ -16,3 +18,4 @@ api_bind_addr = "[::]:3900"
 [admin]
 api_bind_addr = "[::]:3903"
 admin_token_file = "/run/secrets/admin_token"
+metrics_token_file = "/run/secrets/metrics_token"

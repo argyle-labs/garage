@@ -79,19 +79,19 @@ impl ServiceBackend for GarageBackend {
                 .health()
                 .await
                 .map_err(|e| ServiceError::Transport(format!("{e:#}")))?;
-            Ok(ServiceStatus {
-                healthy: h.status == "healthy",
-                detail: format!(
-                    "{}: {}/{} storage nodes up, {}/{} partitions with quorum",
-                    h.status,
-                    h.storage_nodes_up,
-                    h.storage_nodes,
-                    h.partitions_quorum,
-                    h.partitions
-                ),
-                ..Default::default()
-            })
+            Ok(health_status(&h))
         })
+    }
+}
+
+pub fn health_status(h: &api::ClusterHealth) -> ServiceStatus {
+    ServiceStatus {
+        healthy: h.status == "healthy",
+        detail: format!(
+            "{}: {}/{} storage nodes up, {}/{} partitions with quorum",
+            h.status, h.storage_nodes_up, h.storage_nodes, h.partitions_quorum, h.partitions
+        ),
+        ..Default::default()
     }
 }
 
@@ -163,7 +163,7 @@ mod tests {
     }
 
     fn g() -> api::Garage {
-        api::Garage::new("http://g.test/", TOKEN)
+        api::Garage::new("http://g.test/", TOKEN).unwrap()
     }
 
     fn layout(version: u64) -> String {
@@ -224,7 +224,7 @@ mod tests {
             }
             },
             || {
-                let r = block(g().assign_node("n1", "dc1", 1000, &[])).unwrap();
+                let r = block(g().assign_node("n1", "dc1", 1000, &[], false)).unwrap();
                 assert_eq!(r.layout.version, 5);
             },
         );
@@ -235,6 +235,98 @@ mod tests {
             json!({"roles": [{"id": "n1", "zone": "dc1", "capacity": 1000, "tags": []}]})
         );
         assert_eq!(calls[1].body, json!({"version": 5}));
+    }
+
+    fn foreign_layout() -> String {
+        let mut v: Value = serde_json::from_str(&layout(4)).unwrap();
+        v["stagedRoleChanges"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "n2", "remove": true}));
+        v.to_string()
+    }
+
+    fn applied(path: &str) -> Option<(u16, String)> {
+        match path {
+            "UpdateClusterLayout" => Some((200, foreign_layout())),
+            "ApplyClusterLayout" => Some((200, json!({"message": [], "layout": serde_json::from_str::<Value>(&layout(5)).unwrap()}).to_string())),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn layout_apply_refuses_foreign_staged_changes() {
+        let calls = serve(
+            |_, p| applied(p),
+            || {
+                let e = block(g().assign_node("n1", "dc1", 1000, &[], false)).unwrap_err();
+                let e = format!("{e:#}");
+                assert!(
+                    e.contains("n1, n2") && e.contains("--apply-all-staged"),
+                    "{e}"
+                );
+            },
+        );
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn layout_apply_all_staged_applies_foreign_changes() {
+        let calls = serve(
+            |_, p| applied(p),
+            || {
+                block(g().assign_node("n1", "dc1", 1000, &[], true)).unwrap();
+            },
+        );
+        assert_eq!(calls[1].path, "ApplyClusterLayout");
+    }
+
+    #[test]
+    fn invalid_key_and_node_ids_make_no_request() {
+        let calls = serve(
+            |_, _| Some((200, String::new())),
+            || {
+                assert!(block(g().assign_node("n1&x", "dc1", 1, &[], false)).is_err());
+                assert!(block(g().key("GK1/../x")).is_err());
+                assert!(block(g().delete_key("GK1?id=GK2")).is_err());
+                let perms = api::Perms::default();
+                assert!(block(g().grant(true, BUCKET, "GK 1", perms)).is_err());
+            },
+        );
+        assert!(calls.is_empty(), "{calls:?}");
+    }
+
+    #[test]
+    fn alias_queries_are_encoded() {
+        let calls = serve(
+            |_, _| Some((200, bucket_info())),
+            || {
+                block(g().bucket_id("a b&id=x")).unwrap();
+            },
+        );
+        assert_eq!(calls[0].path, "GetBucketInfo?globalAlias=a%20b%26id%3Dx");
+    }
+
+    #[test]
+    fn health_maps_to_service_status() {
+        let h = |status: &str| api::ClusterHealth {
+            status: status.into(),
+            known_nodes: 1,
+            connected_nodes: 1,
+            storage_nodes: 2,
+            storage_nodes_up: 1,
+            partitions: 256,
+            partitions_quorum: 128,
+            partitions_all_ok: 0,
+        };
+        let ok = health_status(&h("healthy"));
+        assert!(ok.healthy);
+        assert_eq!(
+            ok.detail,
+            "healthy: 1/2 storage nodes up, 128/256 partitions with quorum"
+        );
+        assert!(!health_status(&h("degraded")).healthy);
+        assert!(!health_status(&h("unavailable")).healthy);
     }
 
     #[test]
@@ -344,6 +436,60 @@ mod tests {
     }
 
     #[test]
+    fn key_create_store_failure_deletes_the_key() {
+        let caps = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = caps.clone();
+        let e = plugin_toolkit::capsink::with_cap_sink(
+            Box::new(move |cap: &str, req: &str| {
+                log.lock().unwrap().push(format!("{cap} {req}"));
+                match cap {
+                    "http.request" if req.contains("CreateKey") => Ok(
+                        json!({"status": 200, "headers": [], "body": key_info(true).into_bytes()})
+                            .to_string(),
+                    ),
+                    "http.request" => {
+                        Ok(json!({"status": 200, "headers": [], "body": []}).to_string())
+                    }
+                    _ => Err("store offline".into()),
+                }
+            }),
+            || block(tools::create_key(&g(), "main", "ci")).unwrap_err(),
+        );
+        let e = format!("{e:#}");
+        assert!(
+            e.contains("store offline") && e.contains("deleted from garage"),
+            "{e}"
+        );
+        assert!(!e.contains(SECRET), "{e}");
+        let caps = caps.lock().unwrap();
+        assert!(caps[2].contains("DeleteKey?id=GK1"), "{caps:?}");
+    }
+
+    #[test]
+    fn key_import_errors_redact_the_secret() {
+        let e = plugin_toolkit::capsink::with_cap_sink(
+            Box::new(move |cap: &str, _: &str| match cap {
+                "secret.op" => Ok(json!({"value": SECRET, "found": true}).to_string()),
+                "http.request" => Ok(json!({"status": 400, "headers": [],
+                    "body": format!("bad key {SECRET}").into_bytes()})
+                .to_string()),
+                _ => Err(format!("unexpected {cap}")),
+            }),
+            || {
+                let args = tools::KeyImportArgs {
+                    name: "main".into(),
+                    key_id: "GK1".into(),
+                    secret_ref: "garage.main.imported".into(),
+                    key_name: None,
+                };
+                block(tools::import_key(&g(), &args)).unwrap_err()
+            },
+        );
+        let e = format!("{e:#}");
+        assert!(e.contains("HTTP 400") && !e.contains(SECRET), "{e}");
+    }
+
+    #[test]
     fn key_detail_never_asks_for_the_secret() {
         let calls = serve(
             |_, _| Some((200, key_info(false))),
@@ -409,6 +555,53 @@ mod tests {
         let caps = caps.lock().unwrap();
         assert!(caps[0].contains("DeleteKey?id=GK1"), "{caps:?}");
         assert!(caps[1].contains("garage.main.key_GK1"), "{caps:?}");
+    }
+
+    fn delete_with(
+        status: u16,
+        secret: Result<String, String>,
+    ) -> (
+        plugin_toolkit::anyhow::Result<tools::KeyDeleted>,
+        Vec<String>,
+    ) {
+        let caps = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = caps.clone();
+        let out = plugin_toolkit::capsink::with_cap_sink(
+            Box::new(move |cap: &str, req: &str| {
+                log.lock().unwrap().push(format!("{cap} {req}"));
+                match cap {
+                    "http.request" => Ok(json!({"status": status, "headers": [],
+                        "body": "Not Found".as_bytes()})
+                    .to_string()),
+                    _ => secret.clone(),
+                }
+            }),
+            || block(tools::delete_key(&g(), "main", "GK1")),
+        );
+        let caps = caps.lock().unwrap().clone();
+        (out, caps)
+    }
+
+    #[test]
+    fn key_delete_of_a_missing_key_still_removes_the_secret() {
+        let (out, caps) = delete_with(404, Ok(json!({"value": null, "found": true}).to_string()));
+        let out = out.unwrap();
+        assert!(!out.deleted && out.secret_removed);
+        assert!(caps[1].contains("garage.main.key_GK1"), "{caps:?}");
+    }
+
+    #[test]
+    fn key_delete_reports_a_failed_secret_delete() {
+        let (out, _) = delete_with(200, Err("store offline".into()));
+        let e = format!("{:#}", out.unwrap_err());
+        assert!(e.contains("store offline") && e.contains("GK1"), "{e}");
+    }
+
+    #[test]
+    fn key_delete_surfaces_other_garage_errors() {
+        let (out, caps) = delete_with(500, Err("unreached".into()));
+        assert!(format!("{:#}", out.unwrap_err()).contains("HTTP 500"));
+        assert_eq!(caps.len(), 1);
     }
 
     #[test]
