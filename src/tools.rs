@@ -409,7 +409,11 @@ pub struct KeyImportArgs {
 
 pub fn check_import_ref(endpoint: &str, secret_ref: &str) -> Result<()> {
     let prefix = format!("{PROVIDER}.{endpoint}.");
-    if !secret_ref.starts_with(&prefix) || secret_ref.ends_with(".admin_token") {
+    if endpoint.is_empty() || endpoint.contains('.') {
+        bail!("endpoint name must be non-empty and contain no '.'");
+    }
+    let field = secret_ref.strip_prefix(&prefix);
+    if field.is_none_or(|f| f.is_empty() || f.contains('.') || f == "admin_token") {
         bail!("secret_ref must start with {prefix} and must not be the admin token");
     }
     Ok(())
@@ -515,6 +519,9 @@ mod tests {
         assert!(check_import_ref("main", "garage.main.admin_token").is_err());
         assert!(check_import_ref("main", "garage.other.imported").is_err());
         assert!(check_import_ref("main", "homelab.s3").is_err());
+        assert!(check_import_ref("a", "garage.a.b.key_X").is_err());
+        assert!(check_import_ref("a.b", "garage.a.b.key_X").is_err());
+        assert!(check_import_ref("a", "garage.a.key_X").is_ok());
     }
 
     #[test]

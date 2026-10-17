@@ -360,6 +360,21 @@ impl Garage {
         apply_all_staged: bool,
     ) -> Result<LayoutApplied> {
         check_id(node_id)?;
+        if !apply_all_staged {
+            let current = self.layout().await?;
+            if current.staged_role_changes.iter().any(|c| c.id != node_id) {
+                let all: Vec<&str> = current
+                    .staged_role_changes
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .collect();
+                bail!(
+                    "layout has staged changes for other nodes; refusing to apply. staged: {}. \
+                     pass --apply-all-staged to apply them all",
+                    all.join(", ")
+                );
+            }
+        }
         let staged: Layout = self
             .post(
                 "UpdateClusterLayout",

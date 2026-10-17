@@ -218,6 +218,7 @@ mod tests {
         let calls = serve(
             |_, p| {
                 match p {
+                "GetClusterLayout" => Some((200, layout(3))),
                 "UpdateClusterLayout" => Some((200, layout(4))),
                 "ApplyClusterLayout" => Some((200, json!({"message": ["ok"], "layout": serde_json::from_str::<Value>(&layout(5)).unwrap()}).to_string())),
                 _ => None,
@@ -228,13 +229,14 @@ mod tests {
                 assert_eq!(r.layout.version, 5);
             },
         );
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].path, "UpdateClusterLayout");
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].path, "GetClusterLayout");
+        assert_eq!(calls[1].path, "UpdateClusterLayout");
         assert_eq!(
-            calls[0].body,
+            calls[1].body,
             json!({"roles": [{"id": "n1", "zone": "dc1", "capacity": 1000, "tags": []}]})
         );
-        assert_eq!(calls[1].body, json!({"version": 5}));
+        assert_eq!(calls[2].body, json!({"version": 5}));
     }
 
     fn foreign_layout() -> String {
@@ -248,7 +250,7 @@ mod tests {
 
     fn applied(path: &str) -> Option<(u16, String)> {
         match path {
-            "UpdateClusterLayout" => Some((200, foreign_layout())),
+            "GetClusterLayout" | "UpdateClusterLayout" => Some((200, foreign_layout())),
             "ApplyClusterLayout" => Some((200, json!({"message": [], "layout": serde_json::from_str::<Value>(&layout(5)).unwrap()}).to_string())),
             _ => None,
         }
@@ -268,6 +270,10 @@ mod tests {
             },
         );
         assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, "GetClusterLayout");
+        assert!(calls
+            .iter()
+            .all(|c| c.path != "UpdateClusterLayout" && c.path != "ApplyClusterLayout"));
     }
 
     #[test]
@@ -278,6 +284,7 @@ mod tests {
                 block(g().assign_node("n1", "dc1", 1000, &[], true)).unwrap();
             },
         );
+        assert_eq!(calls[0].path, "UpdateClusterLayout");
         assert_eq!(calls[1].path, "ApplyClusterLayout");
     }
 
