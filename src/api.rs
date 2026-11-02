@@ -211,6 +211,8 @@ pub struct LifecycleFilter {
     pub object_size_greater_than: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_size_less_than: Option<i64>,
+    #[serde(default, rename = "And", skip_serializing_if = "Option::is_none")]
+    pub and: Option<Box<LifecycleFilter>>,
 }
 
 #[orca_struct]
@@ -670,5 +672,15 @@ mod tests {
         let e = g.excerpt(&format!("Bearer tok-0123456789abcdef {}", "x".repeat(1000)));
         assert!(!e.contains("tok-0123456789abcdef"), "{e}");
         assert!(e.len() < 300, "{}", e.len());
+    }
+
+    #[test]
+    fn lifecycle_filter_and_round_trips() {
+        let json = r#"{"And":{"Prefix":"logs/","ObjectSizeGreaterThan":1024}}"#;
+        let filter: LifecycleFilter = serde_json::from_str(json).unwrap();
+        let inner = filter.and.as_deref().unwrap();
+        assert_eq!(inner.prefix.as_deref(), Some("logs/"));
+        assert_eq!(inner.object_size_greater_than, Some(1024));
+        assert_eq!(serde_json::to_string(&filter).unwrap(), json);
     }
 }
