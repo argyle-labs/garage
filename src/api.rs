@@ -197,6 +197,60 @@ pub struct Bucket {
     pub unfinished_multipart_upload_parts: u64,
     pub unfinished_multipart_upload_bytes: u64,
     pub quotas: Quotas,
+    #[serde(default)]
+    pub lifecycle_rules: Option<Vec<LifecycleRule>>,
+}
+
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct LifecycleFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_size_greater_than: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_size_less_than: Option<i64>,
+    #[serde(default, rename = "And", skip_serializing_if = "Option::is_none")]
+    pub and: Option<Box<LifecycleFilter>>,
+}
+
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LifecycleExpiration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+}
+
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LifecycleAbortUploads {
+    pub days_after_initiation: u64,
+}
+
+/// PascalCase fields: Garage reuses its S3 XML lifecycle struct inside the
+/// otherwise camelCase admin API JSON.
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LifecycleRule {
+    #[serde(default, rename = "ID", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<LifecycleFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<LifecycleExpiration>,
+    #[serde(
+        default,
+        rename = "AbortIncompleteMultipartUpload",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub abort_incomplete_multipart_upload: Option<LifecycleAbortUploads>,
 }
 
 #[orca_struct]
@@ -441,6 +495,15 @@ impl Garage {
             .await
     }
 
+    pub async fn set_lifecycle(&self, id: &str, rules: &[LifecycleRule]) -> Result<Bucket> {
+        self.post(
+            "UpdateBucket",
+            &[("id", id)],
+            &json!({"lifecycleRules": rules}),
+        )
+        .await
+    }
+
     pub async fn keys(&self) -> Result<Vec<KeySummary>> {
         self.get("ListKeys", &[]).await
     }
@@ -610,5 +673,15 @@ mod tests {
         let e = g.excerpt(&format!("Bearer tok-0123456789abcdef {}", "x".repeat(1000)));
         assert!(!e.contains("tok-0123456789abcdef"), "{e}");
         assert!(e.len() < 300, "{}", e.len());
+    }
+
+    #[test]
+    fn lifecycle_filter_and_round_trips() {
+        let json = r#"{"And":{"Prefix":"logs/","ObjectSizeGreaterThan":1024}}"#;
+        let filter: LifecycleFilter = serde_json::from_str(json).unwrap();
+        let inner = filter.and.as_deref().unwrap();
+        assert_eq!(inner.prefix.as_deref(), Some("logs/"));
+        assert_eq!(inner.object_size_greater_than, Some(1024));
+        assert_eq!(serde_json::to_string(&filter).unwrap(), json);
     }
 }

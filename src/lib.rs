@@ -364,6 +364,153 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_rules_round_trip_through_update_bucket() {
+        let mut info: Value = serde_json::from_str(&bucket_info()).unwrap();
+        let rules = json!([{"ID": "orca", "Status": "Enabled", "Expiration": {"Days": 14}}]);
+        info["lifecycleRules"] = rules.clone();
+        let reply = info.to_string();
+        let mut got = None;
+        let calls = serve(
+            move |_, _| Some((200, reply.clone())),
+            || {
+                let rules: Vec<api::LifecycleRule> = serde_json::from_value(rules.clone()).unwrap();
+                got = Some(block(g().set_lifecycle(BUCKET, &rules)).unwrap());
+            },
+        );
+        assert_eq!(calls[0].method, "POST");
+        assert_eq!(calls[0].path, format!("UpdateBucket?id={BUCKET}"));
+        assert_eq!(calls[0].body, json!({"lifecycleRules": rules}));
+        let got = got.unwrap().lifecycle_rules.unwrap();
+        assert_eq!(got[0].expiration.as_ref().unwrap().days, Some(14));
+    }
+
+    #[test]
+    fn lifecycle_clear_sends_an_empty_rule_list() {
+        let calls = serve(
+            |_, _| Some((200, bucket_info())),
+            || {
+                let b = block(g().set_lifecycle(BUCKET, &[])).unwrap();
+                assert_eq!(b.lifecycle_rules, None);
+            },
+        );
+        assert_eq!(calls[0].body, json!({"lifecycleRules": []}));
+    }
+
+    #[test]
+    fn bucket_without_lifecycle_rules_decodes_to_none() {
+        let b: api::Bucket = serde_json::from_str(&bucket_info()).unwrap();
+        assert_eq!(b.lifecycle_rules, None);
+    }
+
+    #[test]
+    fn lifecycle_on_bucket_without_rules_sends_only_the_orca_rule() {
+        let mut report = None;
+        let calls = serve(
+            |_, _| Some((200, bucket_info())),
+            || {
+                report = Some(
+                    block(tools::apply_lifecycle(
+                        &g(),
+                        &lifecycle_args(Some(14), false),
+                        false,
+                    ))
+                    .unwrap(),
+                );
+            },
+        );
+        assert_eq!(
+            calls[1].body,
+            json!({"lifecycleRules": [
+                {"ID": "orca", "Status": "Enabled", "Expiration": {"Days": 14}}
+            ]})
+        );
+        let report = report.unwrap();
+        assert!(report.existing.is_empty());
+        assert!(report.replaced.is_none());
+    }
+
+    fn lifecycle_args(expire_days: Option<u64>, clear: bool) -> tools::BucketLifecycleArgs {
+        tools::BucketLifecycleArgs {
+            name: "main".into(),
+            bucket: "sccache".into(),
+            expire_days,
+            abort_uploads_days: None,
+            prefix: None,
+            clear,
+        }
+    }
+
+    fn foreign_rule() -> Value {
+        json!({"ID": "logs", "Status": "Disabled",
+            "Filter": {"And": {"Prefix": "logs/", "ObjectSizeGreaterThan": 10}},
+            "Expiration": {"Date": "2027-01-01"}})
+    }
+
+    fn lifecycle_calls(
+        expire_days: Option<u64>,
+        clear: bool,
+        dry_run: bool,
+    ) -> (tools::LifecycleReport, Vec<Call>) {
+        let mut info: Value = serde_json::from_str(&bucket_info()).unwrap();
+        info["lifecycleRules"] = json!([
+            foreign_rule(),
+            {"ID": "orca", "Status": "Enabled", "Expiration": {"Days": 30}}
+        ]);
+        let reply = info.to_string();
+        let mut out = None;
+        let calls = serve(
+            move |_, _| Some((200, reply.clone())),
+            || {
+                out = Some(
+                    block(tools::apply_lifecycle(
+                        &g(),
+                        &lifecycle_args(expire_days, clear),
+                        dry_run,
+                    ))
+                    .unwrap(),
+                );
+            },
+        );
+        (out.unwrap(), calls)
+    }
+
+    #[test]
+    fn lifecycle_keeps_foreign_rules_and_replaces_the_orca_rule() {
+        let (report, calls) = lifecycle_calls(Some(14), false, false);
+        assert_eq!(calls[0].path, "GetBucketInfo?globalAlias=sccache");
+        assert_eq!(calls[1].path, format!("UpdateBucket?id={BUCKET}"));
+        assert_eq!(
+            calls[1].body,
+            json!({"lifecycleRules": [
+                foreign_rule(),
+                {"ID": "orca", "Status": "Enabled", "Expiration": {"Days": 14}}
+            ]})
+        );
+        assert_eq!(report.replaced.unwrap().expiration.unwrap().days, Some(30));
+    }
+
+    #[test]
+    fn lifecycle_clear_removes_only_the_orca_rule() {
+        let (_, calls) = lifecycle_calls(None, true, false);
+        assert_eq!(calls[1].body, json!({"lifecycleRules": [foreign_rule()]}));
+    }
+
+    #[test]
+    fn lifecycle_dry_run_lists_existing_rules_and_sends_nothing() {
+        let (report, calls) = lifecycle_calls(Some(14), false, true);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "GET");
+        assert!(report.dry_run);
+        assert_eq!(report.existing.len(), 2);
+        assert_eq!(report.replaced.unwrap().id.as_deref(), Some("orca"));
+        assert_eq!(report.rules.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&report.rules[0]).unwrap(),
+            foreign_rule()
+        );
+    }
+
+    #[test]
     fn bucket_ids_skip_the_lookup() {
         let calls = serve(
             |_, _| Some((200, String::new())),
