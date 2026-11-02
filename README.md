@@ -80,7 +80,7 @@ Writes run by default; pass `dryRun=true` to preview. Reads need `read`, writes 
 | `garage.bucket.create` | admin | `POST /v2/CreateBucket` |
 | `garage.bucket.delete` | admin | `POST /v2/DeleteBucket` |
 | `garage.bucket.update` | admin | `POST /v2/UpdateBucket` (quotas; needs `--max-size`, `--max-objects` or `--clear`) |
-| `garage.bucket.lifecycle` | admin | `POST /v2/UpdateBucket` (lifecycle rules; needs `--expire-days`, `--abort-uploads-days` or `--clear`; applied daily at midnight) |
+| `garage.bucket.lifecycle` | admin | `POST /v2/UpdateBucket` (installs or replaces the `orca` lifecycle rule, keeping all other rules; needs `--expire-days`, `--abort-uploads-days` or `--clear` to remove only the `orca` rule; applied daily at midnight) |
 | `garage.bucket.allow` | admin | `POST /v2/AllowBucketKey` |
 | `garage.bucket.deny` | admin | `POST /v2/DenyBucketKey` |
 | `garage.bucket.cleanup_uploads` | admin | `POST /v2/CleanupIncompleteUploads` |
