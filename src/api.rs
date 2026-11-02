@@ -232,7 +232,8 @@ pub struct LifecycleAbortUploads {
     pub days_after_initiation: u64,
 }
 
-/// One S3 lifecycle rule in Garage's admin API JSON form.
+/// PascalCase fields: Garage reuses its S3 XML lifecycle struct inside the
+/// otherwise camelCase admin API JSON.
 #[orca_struct]
 #[derive(Debug, Clone, PartialEq)]
 #[serde(rename_all = "PascalCase")]
