@@ -242,6 +242,10 @@ pub struct BucketLifecycleArgs {
 
 pub const LIFECYCLE_RULE_ID: &str = "orca";
 
+/// Garage parses lifecycle days as i64 then casts to usize; 100 years keeps
+/// every value well inside both.
+const MAX_LIFECYCLE_DAYS: u64 = 36500;
+
 /// The orca-managed rule to install, or `None` when `clear` removes it.
 pub fn orca_rule(args: &BucketLifecycleArgs) -> Result<Option<LifecycleRule>> {
     let any = args.expire_days.is_some() || args.abort_uploads_days.is_some();
@@ -256,6 +260,14 @@ pub fn orca_rule(args: &BucketLifecycleArgs) -> Result<Option<LifecycleRule>> {
     }
     if args.expire_days == Some(0) || args.abort_uploads_days == Some(0) {
         bail!("expire_days and abort_uploads_days must be greater than 0");
+    }
+    for (field, days) in [
+        ("expire_days", args.expire_days),
+        ("abort_uploads_days", args.abort_uploads_days),
+    ] {
+        if days.is_some_and(|d| d > MAX_LIFECYCLE_DAYS) {
+            bail!("{field} must be at most {MAX_LIFECYCLE_DAYS} days");
+        }
     }
     if args.prefix.as_deref() == Some("") {
         bail!("prefix must not be empty; omit it to apply the rule to the whole bucket");
@@ -673,6 +685,17 @@ mod tests {
         assert!(orca_rule(&args(None, None, Some("p/"), true)).is_err());
         assert!(orca_rule(&args(Some(0), None, None, false)).is_err());
         assert!(orca_rule(&args(None, Some(0), None, false)).is_err());
+        assert!(orca_rule(&args(Some(36500), Some(36500), None, false)).is_ok());
+        let over = orca_rule(&args(Some(36501), None, None, false)).unwrap_err();
+        assert!(over
+            .to_string()
+            .contains("expire_days must be at most 36500"));
+        let over = orca_rule(&args(None, Some(36501), None, false)).unwrap_err();
+        assert!(over
+            .to_string()
+            .contains("abort_uploads_days must be at most 36500"));
+        assert!(orca_rule(&args(Some(u64::MAX), None, None, false)).is_err());
+        assert!(orca_rule(&args(None, Some(u64::MAX), None, false)).is_err());
         let empty = orca_rule(&args(Some(14), None, Some(""), false)).unwrap_err();
         assert!(empty.to_string().contains("prefix must not be empty"));
         assert!(orca_rule(&args(None, None, None, true)).unwrap().is_none());
