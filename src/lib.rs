@@ -396,6 +396,39 @@ mod tests {
         assert_eq!(calls[0].body, json!({"lifecycleRules": []}));
     }
 
+    #[test]
+    fn bucket_without_lifecycle_rules_decodes_to_none() {
+        let b: api::Bucket = serde_json::from_str(&bucket_info()).unwrap();
+        assert_eq!(b.lifecycle_rules, None);
+    }
+
+    #[test]
+    fn lifecycle_on_bucket_without_rules_sends_only_the_orca_rule() {
+        let mut report = None;
+        let calls = serve(
+            |_, _| Some((200, bucket_info())),
+            || {
+                report = Some(
+                    block(tools::apply_lifecycle(
+                        &g(),
+                        &lifecycle_args(Some(14), false),
+                        false,
+                    ))
+                    .unwrap(),
+                );
+            },
+        );
+        assert_eq!(
+            calls[1].body,
+            json!({"lifecycleRules": [
+                {"ID": "orca", "Status": "Enabled", "Expiration": {"Days": 14}}
+            ]})
+        );
+        let report = report.unwrap();
+        assert!(report.existing.is_empty());
+        assert!(report.replaced.is_none());
+    }
+
     fn lifecycle_args(expire_days: Option<u64>, clear: bool) -> tools::BucketLifecycleArgs {
         tools::BucketLifecycleArgs {
             name: "main".into(),
