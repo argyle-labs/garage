@@ -197,6 +197,57 @@ pub struct Bucket {
     pub unfinished_multipart_upload_parts: u64,
     pub unfinished_multipart_upload_bytes: u64,
     pub quotas: Quotas,
+    #[serde(default)]
+    pub lifecycle_rules: Option<Vec<LifecycleRule>>,
+}
+
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct LifecycleFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_size_greater_than: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_size_less_than: Option<i64>,
+}
+
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LifecycleExpiration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+}
+
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LifecycleAbortUploads {
+    pub days_after_initiation: u64,
+}
+
+/// One S3 lifecycle rule in Garage's admin API JSON form.
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct LifecycleRule {
+    #[serde(default, rename = "ID", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<LifecycleFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<LifecycleExpiration>,
+    #[serde(
+        default,
+        rename = "AbortIncompleteMultipartUpload",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub abort_incomplete_multipart_upload: Option<LifecycleAbortUploads>,
 }
 
 #[orca_struct]
@@ -439,6 +490,15 @@ impl Garage {
     pub async fn set_quotas(&self, id: &str, quotas: Quotas) -> Result<Bucket> {
         self.post("UpdateBucket", &[("id", id)], &json!({"quotas": quotas}))
             .await
+    }
+
+    pub async fn set_lifecycle(&self, id: &str, rules: &[LifecycleRule]) -> Result<Bucket> {
+        self.post(
+            "UpdateBucket",
+            &[("id", id)],
+            &json!({"lifecycleRules": rules}),
+        )
+        .await
     }
 
     pub async fn keys(&self) -> Result<Vec<KeySummary>> {

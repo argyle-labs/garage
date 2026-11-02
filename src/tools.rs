@@ -3,7 +3,8 @@ use plugin_toolkit::secrets;
 
 use crate::api::{
     Bucket, BucketRef, BucketSummary, ClusterHealth, ClusterStatus, Garage, Key, KeySummary,
-    Layout, LayoutApplied, Perms, Quotas,
+    Layout, LayoutApplied, LifecycleAbortUploads, LifecycleExpiration, LifecycleFilter,
+    LifecycleRule, Perms, Quotas,
 };
 use crate::endpoint_db;
 
@@ -214,6 +215,80 @@ async fn garage_bucket_update(args: BucketUpdateArgs, _ctx: &ToolCtx) -> Result<
     let g = connect(&args.name).await?;
     let id = g.bucket_id(&args.bucket).await?;
     g.set_quotas(&id, quotas).await
+}
+
+#[orca_struct(args)]
+pub struct BucketLifecycleArgs {
+    /// Registered garage endpoint name.
+    #[arg(long)]
+    pub name: String,
+    /// Bucket id (64 hex chars) or global alias.
+    #[arg(long)]
+    pub bucket: String,
+    /// Delete objects this many days after their last modification.
+    #[arg(long)]
+    pub expire_days: Option<u64>,
+    /// Abort incomplete multipart uploads this many days after they started.
+    #[arg(long)]
+    pub abort_uploads_days: Option<u64>,
+    /// Apply the rule only to keys under this prefix.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Remove all lifecycle rules.
+    #[arg(long)]
+    #[serde(default)]
+    pub clear: bool,
+}
+
+pub const LIFECYCLE_RULE_ID: &str = "orca";
+
+pub fn lifecycle_rules(args: &BucketLifecycleArgs) -> Result<Vec<LifecycleRule>> {
+    let any = args.expire_days.is_some() || args.abort_uploads_days.is_some();
+    if any == args.clear {
+        bail!("pass expire_days and/or abort_uploads_days, or clear to remove all rules");
+    }
+    if args.clear {
+        if args.prefix.is_some() {
+            bail!("prefix has no effect with clear");
+        }
+        return Ok(Vec::new());
+    }
+    if args.expire_days == Some(0) || args.abort_uploads_days == Some(0) {
+        bail!("expire_days and abort_uploads_days must be greater than 0");
+    }
+    Ok(vec![LifecycleRule {
+        id: Some(LIFECYCLE_RULE_ID.to_string()),
+        status: "Enabled".to_string(),
+        filter: args.prefix.clone().map(|prefix| LifecycleFilter {
+            prefix: Some(prefix),
+            ..LifecycleFilter::default()
+        }),
+        expiration: args.expire_days.map(|days| LifecycleExpiration {
+            days: Some(days),
+            date: None,
+        }),
+        abort_incomplete_multipart_upload: args.abort_uploads_days.map(|days_after_initiation| {
+            LifecycleAbortUploads {
+                days_after_initiation,
+            }
+        }),
+    }])
+}
+
+/// Replace a bucket's lifecycle rules with one expiration and/or abort-upload
+/// rule, or remove them with `clear` (`UpdateBucket`). Garage's lifecycle
+/// worker applies rules once a day at midnight, so deletion is not immediate.
+#[orca_tool(
+    domain = "garage",
+    verb = "bucket.lifecycle",
+    role = "admin",
+    execute_gated = true
+)]
+async fn garage_bucket_lifecycle(args: BucketLifecycleArgs, _ctx: &ToolCtx) -> Result<Bucket> {
+    let rules = lifecycle_rules(&args)?;
+    let g = connect(&args.name).await?;
+    let id = g.bucket_id(&args.bucket).await?;
+    g.set_lifecycle(&id, &rules).await
 }
 
 #[orca_struct(args)]
@@ -499,6 +574,7 @@ mod tests {
         "garage.bucket.create",
         "garage.bucket.delete",
         "garage.bucket.update",
+        "garage.bucket.lifecycle",
         "garage.bucket.allow",
         "garage.bucket.deny",
         "garage.bucket.cleanup_uploads",
@@ -537,6 +613,36 @@ mod tests {
         assert!(quotas(&args(Some(1), true)).is_err());
         assert_eq!(quotas(&args(Some(1), false)).unwrap().max_size, Some(1));
         assert_eq!(quotas(&args(None, true)).unwrap(), Quotas::default());
+    }
+
+    #[test]
+    fn bucket_lifecycle_builds_one_rule_or_clears() {
+        let args =
+            |expire_days, abort_uploads_days, prefix: Option<&str>, clear| BucketLifecycleArgs {
+                name: "main".into(),
+                bucket: "sccache".into(),
+                expire_days,
+                abort_uploads_days,
+                prefix: prefix.map(str::to_string),
+                clear,
+            };
+        assert!(lifecycle_rules(&args(None, None, None, false)).is_err());
+        assert!(lifecycle_rules(&args(Some(14), None, None, true)).is_err());
+        assert!(lifecycle_rules(&args(None, None, Some("p/"), true)).is_err());
+        assert!(lifecycle_rules(&args(Some(0), None, None, false)).is_err());
+        assert!(lifecycle_rules(&args(None, Some(0), None, false)).is_err());
+        assert!(lifecycle_rules(&args(None, None, None, true))
+            .unwrap()
+            .is_empty());
+        let rules = lifecycle_rules(&args(Some(14), Some(1), Some("p/"), false)).unwrap();
+        assert_eq!(
+            plugin_toolkit::serde_json::to_value(&rules).unwrap(),
+            json!([{
+                "ID": "orca", "Status": "Enabled", "Filter": {"Prefix": "p/"},
+                "Expiration": {"Days": 14},
+                "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}
+            }])
+        );
     }
 
     #[test]

@@ -364,6 +364,39 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_rules_round_trip_through_update_bucket() {
+        let mut info: Value = serde_json::from_str(&bucket_info()).unwrap();
+        let rules = json!([{"ID": "orca", "Status": "Enabled", "Expiration": {"Days": 14}}]);
+        info["lifecycleRules"] = rules.clone();
+        let reply = info.to_string();
+        let mut got = None;
+        let calls = serve(
+            move |_, _| Some((200, reply.clone())),
+            || {
+                let rules: Vec<api::LifecycleRule> = serde_json::from_value(rules.clone()).unwrap();
+                got = Some(block(g().set_lifecycle(BUCKET, &rules)).unwrap());
+            },
+        );
+        assert_eq!(calls[0].method, "POST");
+        assert_eq!(calls[0].path, format!("UpdateBucket?id={BUCKET}"));
+        assert_eq!(calls[0].body, json!({"lifecycleRules": rules}));
+        let got = got.unwrap().lifecycle_rules.unwrap();
+        assert_eq!(got[0].expiration.as_ref().unwrap().days, Some(14));
+    }
+
+    #[test]
+    fn lifecycle_clear_sends_an_empty_rule_list() {
+        let calls = serve(
+            |_, _| Some((200, bucket_info())),
+            || {
+                let b = block(g().set_lifecycle(BUCKET, &[])).unwrap();
+                assert_eq!(b.lifecycle_rules, None);
+            },
+        );
+        assert_eq!(calls[0].body, json!({"lifecycleRules": []}));
+    }
+
+    #[test]
     fn bucket_ids_skip_the_lookup() {
         let calls = serve(
             |_, _| Some((200, String::new())),
@@ -682,6 +715,10 @@ mod tests {
                     (
                         "garage.bucket.update",
                         json!({"name": "main", "bucket": "sccache", "max_size": 1, "dryRun": true}),
+                    ),
+                    (
+                        "garage.bucket.lifecycle",
+                        json!({"name": "main", "bucket": "sccache", "expire_days": 14, "dryRun": true}),
                     ),
                     (
                         "garage.bucket.allow",

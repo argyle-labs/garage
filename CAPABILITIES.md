@@ -6,7 +6,7 @@
 ## Tools (admin API v2)
 - [x] cluster: `health`, `status`
 - [x] layout: `detail`, `apply` (single node, zone + capacity, applied at the next version)
-- [x] bucket: `list`, `detail`, `create`, `delete`, `update` (quotas), `allow`, `deny`, `cleanup_uploads`
+- [x] bucket: `list`, `detail`, `create`, `delete`, `update` (quotas), `lifecycle` (expiration rules), `allow`, `deny`, `cleanup_uploads`
 - [x] key: `list`, `detail`, `create`, `import`, `delete` — secrets live only in the orca secret store
 
 ## ServiceBackend
