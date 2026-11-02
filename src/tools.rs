@@ -257,6 +257,9 @@ pub fn orca_rule(args: &BucketLifecycleArgs) -> Result<Option<LifecycleRule>> {
     if args.expire_days == Some(0) || args.abort_uploads_days == Some(0) {
         bail!("expire_days and abort_uploads_days must be greater than 0");
     }
+    if args.prefix.as_deref() == Some("") {
+        bail!("prefix must not be empty; omit it to apply the rule to the whole bucket");
+    }
     Ok(Some(LifecycleRule {
         id: Some(LIFECYCLE_RULE_ID.to_string()),
         status: "Enabled".to_string(),
@@ -670,6 +673,8 @@ mod tests {
         assert!(orca_rule(&args(None, None, Some("p/"), true)).is_err());
         assert!(orca_rule(&args(Some(0), None, None, false)).is_err());
         assert!(orca_rule(&args(None, Some(0), None, false)).is_err());
+        let empty = orca_rule(&args(Some(14), None, Some(""), false)).unwrap_err();
+        assert!(empty.to_string().contains("prefix must not be empty"));
         assert!(orca_rule(&args(None, None, None, true)).unwrap().is_none());
         let rule = orca_rule(&args(Some(14), Some(1), Some("p/"), false)).unwrap();
         assert_eq!(
